@@ -1,4 +1,5 @@
-obj-m := ssd1306_lcd_driver.o
+obj-m := lcd-ssd1306.o
+lcd-ssd1306-y = ssd1306_i2c.o ezfont.o
 
 all:
 	make -C $(KERNEL_SRC) M=$(shell pwd) modules

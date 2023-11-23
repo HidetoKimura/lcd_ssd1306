@@ -1,11 +1,11 @@
 /***************************************************************************//**
-*  \file       driver.c
+*  \file       ssd1306_i2c.c
 *
 *  \details    SSD_1306 OLED Display I2C driver 
 *
-*  \author     EmbeTronicX
+*  \author     Hideto Kimura
 *
-*  \Tested with Linux raspberrypi 5.4.51-v7l+
+*  \Tested with Linux raspberrypi 6.1.61-v8+
 *
 * *******************************************************************************/
 #include <linux/module.h>
@@ -14,20 +14,22 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
- 
+#include "ezfont.h"
+#include "bitmap_data.h" 
+
 #define I2C_BUS_AVAILABLE       (          1 )              // I2C Bus available in our Raspberry Pi
 #define SLAVE_DEVICE_NAME       ( "ETX_OLED" )              // Device and Driver Name
 #define SSD1306_SLAVE_ADDR      (       0x3C )              // SSD1306 OLED Slave Address
 #define SSD1306_MAX_SEG         (        128 )              // Maximum segment
 #define SSD1306_MAX_LINE        (          7 )              // Maximum line
-#define SSD1306_DEF_FONT_SIZE   (          5 )              // Default font size
+#define SSD1306_DEF_FONT_SIZE   (          8 )              // Default font size
 
 /*
 ** Function prototypes.
 */ 
 static int  I2C_Read( unsigned char *out_buf, unsigned int len );
 static int  I2C_Write( unsigned char *buf, unsigned int len );
-static void SSD1306_PrintChar( unsigned char c );
+static u8* SSD1306_PrintChar( u8* str );
 static void SSD1306_String( unsigned char *str );
 static void SSD1306_InvertDisplay(bool need_to_invert);
 static void SSD1306_SetBrightness(uint8_t brightnessValue);
@@ -61,7 +63,7 @@ static uint8_t SSD1306_FontSize  = SSD1306_DEF_FONT_SIZE;
 /*
 ** Array Variable to store the letters.
 */ 
-static const unsigned char SSD1306_font[][SSD1306_DEF_FONT_SIZE]= 
+static const unsigned char SSD1306_font[][5]= 
 {
     {0x00, 0x00, 0x00, 0x00, 0x00},   // space
     {0x00, 0x00, 0x2f, 0x00, 0x00},   // !
@@ -307,48 +309,126 @@ static void  SSD1306_GoToNextLine( void )
 **      c   -> character to be written
 ** 
 */
-static void SSD1306_PrintChar(unsigned char c)
+#define BIT(nr)			(UL(1) << (nr))
+static u8* SSD1306_PrintChar(u8 *str)
 {
-  uint8_t data_byte;
-  uint8_t temp = 0;
+  uint8_t font_data[8];
+  uint8_t inv_data[8];
+  int i, col;
+  uint8_t* tok;
 
   /*
   ** If we character is greater than segment len or we got new line charcter
   ** then move the cursor to the new line
   */ 
   if( (( SSD1306_CursorPos + SSD1306_FontSize ) >= SSD1306_MAX_SEG ) ||
-      ( c == '\n' )
+      ( *str == '\n' )
   )
-  {
-    SSD1306_GoToNextLine();
-  }
+  
+  SSD1306_GoToNextLine();
 
   // print charcters other than new line
-  if( c != '\n' )
+  if( *str != '\n' )
   {
-  
-    /*
-    ** In our font array (SSD1306_font), space starts in 0th index.
-    ** But in ASCII table, Space starts from 32 (0x20).
-    ** So we need to match the ASCII table with our font table.
-    ** We can subtract 32 (0x20) in order to match with our font table.
-    */
-    c -= 0x20;  //or c -= ' ';
+      tok = ezfont_get_fontdata_by_utf8(str, true, font_data, sizeof(font_data));
+      if (tok == NULL) {
+        return NULL;
+      }
+      memset(inv_data, 0, sizeof(inv_data));
+      for (i = 0; i < 8; i++) {
+        if (font_data[i] & BIT(7)) inv_data[0] |= BIT(i);
+        if (font_data[i] & BIT(6)) inv_data[1] |= BIT(i);
+        if (font_data[i] & BIT(5)) inv_data[2] |= BIT(i);
+        if (font_data[i] & BIT(4)) inv_data[3] |= BIT(i);
+        if (font_data[i] & BIT(3)) inv_data[4] |= BIT(i);
+        if (font_data[i] & BIT(2)) inv_data[5] |= BIT(i);
+        if (font_data[i] & BIT(1)) inv_data[6] |= BIT(i);
+        if (font_data[i] & BIT(0)) inv_data[7] |= BIT(i);
+      }
 
-    do
-    {
-      data_byte= SSD1306_font[c][temp]; // Get the data to be displayed from LookUptable
-
-      SSD1306_Write(false, data_byte);  // write data to the OLED
-      SSD1306_CursorPos++;
-      
-      temp++;
-      
-    } while ( temp < SSD1306_FontSize);
-    SSD1306_Write(false, 0x00);         //Display the data
-    SSD1306_CursorPos++;
+      for(col = 0; col < 8; col++) { 
+          SSD1306_Write(false, inv_data[col]);  // write data to the OLED
+          SSD1306_CursorPos++;      
+      };
+  } else {
+      tok = ++str;
+  }
+  return tok;
+}
+#define BITMAP_X_RES 16
+#define BITMAP_Y_RES 16
+static bool read_bitmap(int x, int y)
+{
+  uint8_t color;
+  color = sample_bmp_data[y * BITMAP_X_RES + x];
+  if (color == 0 || color == 7 | color == 6) {
+    return false;
+  } else {
+    return true;
   }
 }
+
+static void SSD1306_bitmap(void)
+{
+  uint8_t inv_data[8];
+  int i, col;
+  int x, y;
+
+  memset(inv_data, 0, sizeof(inv_data));
+  for(x = 0; x < BITMAP_X_RES / 2; x++) { 
+    for(y = 0; y < BITMAP_Y_RES / 2; y++) {
+      if (read_bitmap(x, y)) inv_data[x] |= BIT(y);
+    }
+  }
+
+  for(col = 0; col < 8; col++) { 
+      SSD1306_Write(false, inv_data[col]);  // write data to the OLED
+      SSD1306_CursorPos++;      
+  }
+
+  memset(inv_data, 0, sizeof(inv_data));
+  for(x = BITMAP_X_RES / 2; x < BITMAP_X_RES; x++) { 
+    for(y = 0; y < BITMAP_Y_RES / 2; y++) {
+      if (read_bitmap(x, y)) inv_data[x - BITMAP_X_RES / 2] |= BIT(y);
+    }
+  }
+
+  for(col = 0; col < 8; col++) { 
+      SSD1306_Write(false, inv_data[col]);  // write data to the OLED
+      SSD1306_CursorPos++;      
+  }
+  
+  SSD1306_GoToNextLine();
+
+  memset(inv_data, 0, sizeof(inv_data));
+  for(x = 0; x < BITMAP_X_RES / 2; x++) { 
+    for(y = BITMAP_Y_RES / 2; y < BITMAP_Y_RES; y++) {
+      if (read_bitmap(x, y)) inv_data[x] |= BIT(y - BITMAP_Y_RES / 2);
+    }
+  }
+
+  for(col = 0; col < 8; col++) { 
+      SSD1306_Write(false, inv_data[col]);  // write data to the OLED
+      SSD1306_CursorPos++;      
+  }
+
+  memset(inv_data, 0, sizeof(inv_data));
+  for(x = BITMAP_X_RES / 2; x < BITMAP_X_RES; x++) { 
+    for(y = BITMAP_Y_RES / 2; y < BITMAP_Y_RES; y++) {
+      if (read_bitmap(x, y)) inv_data[x - BITMAP_X_RES / 2] |= BIT(y - BITMAP_Y_RES / 2);
+    }
+  }
+
+  for(col = 0; col < 8; col++) { 
+      SSD1306_Write(false, inv_data[col]);  // write data to the OLED
+      SSD1306_CursorPos++;      
+  }
+
+  SSD1306_GoToNextLine();
+
+  return;
+}
+
 
 /*
 ** This function is specific to the SSD_1306 OLED.
@@ -360,9 +440,11 @@ static void SSD1306_PrintChar(unsigned char c)
 */
 static void SSD1306_String(unsigned char *str)
 {
-  while(*str)
+  int count = 0;
+  while(*str && count < 4096) 
   {
-    SSD1306_PrintChar(*str++);
+    str = SSD1306_PrintChar(str);
+    count++;
   }
 }
 
@@ -558,11 +640,25 @@ static int etx_oled_probe(struct i2c_client *client,
   
   //Set cursor
   SSD1306_SetCursor(0,0);  
-  SSD1306_StartScrollHorizontal( true, 0, 2);
+//  SSD1306_StartScrollHorizontal( true, 0, 2);
 
   //Write String to OLED
-  SSD1306_String("Welcome\nTo\nEmbeTronicX\n\n");
-  
+  SSD1306_String("プルプルッ！ぼく、 悪いスライムじゃないよ\n\n");
+
+  SSD1306_bitmap();
+
+#if 0 /* For Test */
+  SSD1306_String("ABCDEFGHIJKLMNOPQRSTUVWXYZ\n");
+  SSD1306_String("abcdefghijklmnopqrstuvwxyz\n");
+  SSD1306_String("0123456789\n");
+  SSD1306_String(" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~\n");
+
+  SSD1306_StartScrollHorizontal(true, 0, 2);
+#endif
+  msleep(1000);
+
+  SSD1306_InvertDisplay(true);
+
   pr_info("OLED Probed!!!\n");
   
   return 0;
@@ -575,11 +671,16 @@ static int etx_oled_probe(struct i2c_client *client,
 static void etx_oled_remove(struct i2c_client *client)
 {
   //Set cursor
-  //SSD1306_SetCursor(2,0);  
-  //Write String to OLED
-  SSD1306_String("ThanK YoU!!!");
+  SSD1306_SetCursor(0,0);  
+  //clear the display
+  SSD1306_Fill(0x00);
+
+  SSD1306_InvertDisplay(false);
+
+//SSD1306_String("ThanK YoU!!!");
+  SSD1306_String("遊んでくれて、ありがと。つまらなかったわ。じゃあね。\n");
   
-  msleep(1000);
+  msleep(3000);
   
   //Set cursor
   SSD1306_SetCursor(0,0);  
@@ -627,11 +728,11 @@ static struct i2c_board_info oled_i2c_board_info = {
 static int __init etx_driver_init(void)
 {
   int ret = -1;
-  etx_i2c_adapter     = i2c_get_adapter(I2C_BUS_AVAILABLE);
+
+  etx_i2c_adapter     = i2c_get_adapter(I2C_BUS_AVAILABLE); 
   
   if( etx_i2c_adapter != NULL )
   {
-//  etx_i2c_client_oled = i2c_new_device(etx_i2c_adapter, &oled_i2c_board_info);
     etx_i2c_client_oled = i2c_new_client_device(etx_i2c_adapter, &oled_i2c_board_info);
     
     if( etx_i2c_client_oled != NULL )
@@ -661,6 +762,6 @@ module_init(etx_driver_init);
 module_exit(etx_driver_exit);
  
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("EmbeTronicX <embetronicx@gmail.com>");
+MODULE_AUTHOR("Hideto Kimura");
 MODULE_DESCRIPTION("SSD1306 I2C Driver");
-MODULE_VERSION("1.40");
+MODULE_VERSION("1.00");
