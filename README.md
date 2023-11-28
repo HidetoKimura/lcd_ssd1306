@@ -32,3 +32,10 @@ In rpi
 insmod lcd-ssd1306.ko 
 rmmod lcd-ssd1306.
 ~~~~
+
+# modify /boot/config.txt
+
+In rpi
+~~~~
+dtparam=i2c_arm=on
+~~~~
